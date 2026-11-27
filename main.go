@@ -10,6 +10,7 @@ import (
 	"net/smtp"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +30,11 @@ type APIResponse struct {
 const (
 	TargetEmail = "muthman465@gmail.com"
 	TargetPhone = "08133059491"
+)
+
+var (
+	mu              sync.Mutex
+	submissionMutex sync.Mutex
 )
 
 func main() {
@@ -114,9 +120,9 @@ func handleContact(w http.ResponseWriter, r *http.Request) {
 	req.Subject = strings.TrimSpace(req.Subject)
 	req.Message = strings.TrimSpace(req.Message)
 
-	if req.Name == "" || req.Message == "" {
+	if req.Name == "" || req.Phone == "" || req.Message == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(APIResponse{Success: false, Message: "Name and message are required."})
+		json.NewEncoder(w).Encode(APIResponse{Success: false, Message: "Name, phone number and message are required."})
 		return
 	}
 	if len(req.Name) > 100 || len(req.Message) > 5000 || len(req.Subject) > 200 || len(req.Phone) > 30 {
@@ -133,8 +139,14 @@ func handleContact(w http.ResponseWriter, r *http.Request) {
 		req.Subject = "Website enquiry"
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
+
 	if err := saveSubmission(req); err != nil {
 		log.Printf("[SUBMISSION STORAGE ERROR] %v", err)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(APIResponse{Success: false, Message: "The enquiry system is temporarily unavailable. Please call or WhatsApp us."})
+		return
 	}
 
 	if err := dispatchEmail(req.Name, req.Email, req.Phone, req.Subject, req.Message); err != nil {
@@ -150,6 +162,12 @@ func handleContact(w http.ResponseWriter, r *http.Request) {
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
 	json.NewEncoder(w).Encode(APIResponse{Success: true, Message: "Backend online"})
 }
 
@@ -159,22 +177,39 @@ func dispatchEmail(senderName, senderEmail, senderPhone, subject, bodyContent st
 	smtpUser := os.Getenv("SMTP_USER")
 	smtpPass := os.Getenv("SMTP_PASS")
 
+	cleanLine := func(value string) string {
+		value = strings.ReplaceAll(value, "\r", " ")
+		return strings.ReplaceAll(value, "\n", " ")
+	}
+	senderName = cleanLine(strings.TrimSpace(senderName))
+	senderEmail = cleanLine(strings.TrimSpace(senderEmail))
+	senderPhone = cleanLine(strings.TrimSpace(senderPhone))
+	subject = cleanLine(strings.TrimSpace(subject))
+	if subject == "" {
+		subject = "Website enquiry"
+	}
+	if smtpPort == "" {
+		smtpPort = "587"
+	}
+	targetEmail := os.Getenv("TARGET_EMAIL")
+	if targetEmail == "" {
+		targetEmail = TargetEmail
+	}
+	if senderEmail == "" {
+		senderEmail = "no-reply@thebeautifulpen.com"
+	}
+
 	if smtpHost == "" || smtpUser == "" || smtpPass == "" {
-		log.Println("[DEV MODE] SMTP credentials missing in environment. Email preview output:")
-		fmt.Printf("--------------------------------------------------\n")
-		fmt.Printf("TO: %s\n", TargetEmail)
-		fmt.Printf("FROM: %s <%s>\n", senderName, senderEmail)
-		fmt.Printf("SUBJECT: %s\n", subject)
-		fmt.Printf("DATE: %s\n", time.Now().Format(time.RFC1123))
-		fmt.Printf("BODY:\n%s\n", bodyContent)
-		fmt.Printf("--------------------------------------------------\n")
+		log.Println("[DEV MODE] SMTP credentials missing; enquiry preview:")
+		fmt.Printf("TO: %s\nFROM: %s <%s>\nPHONE: %s\nSUBJECT: %s\n%s\n",
+			targetEmail, senderName, senderEmail, senderPhone, subject, bodyContent)
 		return nil
 	}
 
 	var buffer bytes.Buffer
 	mime := "MIME-version: 1.0;\nContent-Type: text/plain; charset=\"UTF-8\";\n\n"
 	buffer.WriteString(fmt.Sprintf("From: %s <%s>\r\n", senderName, smtpUser))
-	buffer.WriteString(fmt.Sprintf("To: %s\r\n", TargetEmail))
+	buffer.WriteString(fmt.Sprintf("To: %s\r\n", targetEmail))
 	buffer.WriteString(fmt.Sprintf("Reply-To: %s\r\n", senderEmail))
 	buffer.WriteString(fmt.Sprintf("Subject: [THE BEAUTIFUL PEN WEBSITE] %s\r\n", subject))
 	buffer.WriteString(mime)
@@ -187,10 +222,13 @@ func dispatchEmail(senderName, senderEmail, senderPhone, subject, bodyContent st
 	auth := smtp.PlainAuth("", smtpUser, smtpPass, smtpHost)
 	address := fmt.Sprintf("%s:%s", smtpHost, smtpPort)
 
-	return smtp.SendMail(address, auth, smtpUser, []string{TargetEmail}, buffer.Bytes())
+	return smtp.SendMail(address, auth, smtpUser, []string{targetEmail}, buffer.Bytes())
 }
 
 func saveSubmission(req ContactRequest) error {
+	submissionMutex.Lock()
+	defer submissionMutex.Unlock()
+
 	file, err := os.OpenFile("submissions.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -207,7 +245,10 @@ func saveSubmission(req ContactRequest) error {
 		return err
 	}
 	_, err = file.Write(append(data, '\n'))
-	return err
+	if err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
 func serveStaticFile(fileName, contentType string) http.HandlerFunc {
