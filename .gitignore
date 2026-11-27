@@ -1,3 +1,4 @@
-server
-submissions.jsonl
+backend/server
+backend/data/submissions.jsonl
+.env
 *.log

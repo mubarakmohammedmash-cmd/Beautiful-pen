@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -47,9 +48,9 @@ func main() {
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/api/contact", handleContact)
 	mux.HandleFunc("/api/health", handleHealth)
-	mux.HandleFunc("/favicon.svg", serveStaticFile("favicon.svg", "image/svg+xml"))
-	mux.HandleFunc("/sitemap.xml", serveStaticFile("sitemap.xml", "application/xml"))
-	mux.HandleFunc("/robots.txt", serveStaticFile("robots.txt", "text/plain"))
+	mux.HandleFunc("/favicon.svg", serveStaticFile("frontend/favicon.svg", "image/svg+xml"))
+	mux.HandleFunc("/sitemap.xml", serveStaticFile("frontend/sitemap.xml", "application/xml"))
+	mux.HandleFunc("/robots.txt", serveStaticFile("frontend/robots.txt", "text/plain"))
 
 	server := &http.Server{
 		Addr:         ":" + port,
@@ -84,7 +85,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, "index.html")
+	http.ServeFile(w, r, projectFile("frontend", "index.html"))
 }
 
 func handleContact(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +230,7 @@ func saveSubmission(req ContactRequest) error {
 	submissionMutex.Lock()
 	defer submissionMutex.Unlock()
 
-	file, err := os.OpenFile("submissions.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	file, err := os.OpenFile(projectFile("backend", "data", "submissions.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
@@ -254,6 +255,18 @@ func saveSubmission(req ContactRequest) error {
 func serveStaticFile(fileName, contentType string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
-		http.ServeFile(w, r, fileName)
+		http.ServeFile(w, r, projectFile(fileName))
 	}
+}
+
+func projectFile(parts ...string) string {
+	root, err := os.Getwd()
+	if err != nil {
+		root = "."
+	}
+	if filepath.Base(root) == "backend" {
+		root = filepath.Dir(root)
+	}
+	all := append([]string{root}, parts...)
+	return filepath.Join(all...)
 }
